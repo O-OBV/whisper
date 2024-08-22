@@ -224,26 +224,31 @@ def transcribe(
         input_stride * HOP_LENGTH / SAMPLE_RATE
     )  # time per output token: 0.02 (seconds)
     all_tokens = []
+    all_token_probs = []
     all_segments = []
     prompt_reset_since = 0
 
     if initial_prompt is not None:
         initial_prompt_tokens = tokenizer.encode(" " + initial_prompt.strip())
         all_tokens.extend(initial_prompt_tokens)
+        all_token_probs.extend([1.0] * len(initial_prompt_tokens))
+        
     else:
         initial_prompt_tokens = []
 
     def new_segment(
-        *, start: float, end: float, tokens: torch.Tensor, result: DecodingResult
+        *, start: float, end: float, tokens: torch.Tensor, token_probs: List[float], result: DecodingResult
     ):
         tokens = tokens.tolist()
         text_tokens = [token for token in tokens if token < tokenizer.eot]
+        assert(len(tokens) == len(token_probs))
         return {
             "seek": seek,
             "start": start,
             "end": end,
             "text": tokenizer.decode(text_tokens),
             "tokens": tokens,
+            "token_probs": token_probs,
             "temperature": result.temperature,
             "avg_logprob": result.avg_logprob,
             "compression_ratio": result.compression_ratio,
@@ -334,6 +339,7 @@ def transcribe(
                 last_slice = 0
                 for current_slice in slices:
                     sliced_tokens = tokens[last_slice:current_slice]
+                    sliced_probs = result.token_probs[last_slice:current_slice]
                     start_timestamp_pos = (
                         sliced_tokens[0].item() - tokenizer.timestamp_begin
                     )
@@ -345,6 +351,7 @@ def transcribe(
                             start=time_offset + start_timestamp_pos * time_precision,
                             end=time_offset + end_timestamp_pos * time_precision,
                             tokens=sliced_tokens,
+                            token_probs=sliced_probs,
                             result=result,
                         )
                     )
@@ -377,6 +384,7 @@ def transcribe(
                         start=time_offset,
                         end=time_offset + duration,
                         tokens=tokens,
+                        token_probs=result.token_probs,
                         result=result,
                     )
                 )
@@ -484,6 +492,12 @@ def transcribe(
                 [token for segment in current_segments for token in segment["tokens"]]
             )
 
+            all_token_probs.extend(
+                [prob for segment in current_segments for prob in segment["token_probs"]]
+            )
+
+            assert(len(all_tokens) == len(all_token_probs))
+
             if not condition_on_previous_text or result.temperature > 0.5:
                 # do not feed the prompt tokens if a high temperature was used
                 prompt_reset_since = len(all_tokens)
@@ -493,6 +507,8 @@ def transcribe(
 
     return dict(
         text=tokenizer.decode(all_tokens[len(initial_prompt_tokens) :]),
+        tokens=all_tokens,
+        token_probs=all_token_probs,
         segments=all_segments,
         language=language,
     )
